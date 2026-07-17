@@ -1,0 +1,798 @@
+{
+  "name": "Gmail AI Classifier, Labeler & Draft Assistant",
+  "nodes": [
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyMinute"
+            }
+          ]
+        },
+        "simple": false,
+        "filters": {
+          "readStatus": "unread"
+        },
+        "options": {}
+      },
+      "id": "84d059fb-28f1-4004-ae62-bec53d4826b8",
+      "name": "Gmail Trigger",
+      "type": "n8n-nodes-base.gmailTrigger",
+      "typeVersion": 1.4,
+      "position": [
+        0,
+        144
+      ],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "Ta2ubITc6prHXHNZ",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "label",
+        "returnAll": true
+      },
+      "id": "95c3a031-6884-4c30-b880-71cf790fa897",
+      "name": "Get Existing Labels",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        288,
+        0
+      ],
+      "executeOnce": true,
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "webhookId": "8970d3cd-1855-4937-bcf0-1e22b65aeb85",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "Ta2ubITc6prHXHNZ",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=You are an email triage assistant. Analyse the email below and return structured JSON.\n\nRules:\n- \"category\" MUST be exactly one of: Important, University, Assignment, Internship, Job, Personal, Shopping, Banking, Promotion, Spam, Other.\n- \"priority\" MUST be exactly one of: High, Medium, Low.\n- \"replyRequired\" is true only when the email genuinely needs a personal reply from the recipient (a direct question, request, or actionable message). Newsletters, promotions, notifications, receipts and spam are false.\n- When replyRequired is true, write a concise, polite, professional \"replyBody\" as if written by the recipient (no placeholders, no \"here is a draft\" preamble) and a matching \"replySubject\". When false, set replyBody to \"\" and replySubject to \"\".\n\n--- EMAIL ---\nSubject: {{ $json.subject || ($json.headers && $json.headers.subject) }}\nFrom: {{ ($json.headers && $json.headers.from) || $json.from }}\n\nBody:\n{{ $json.text || $json.textAsHtml || $json.snippet }}",
+        "hasOutputParser": true,
+        "batching": {}
+      },
+      "id": "4a434d1d-b70e-4b5f-af11-0c60f680745b",
+      "name": "Classify Email",
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.9,
+      "position": [
+        224,
+        304
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "options": {
+          "temperature": 0.2
+        }
+      },
+      "id": "6c5b01ef-0f4a-4422-ad95-ec108ec46574",
+      "name": "Gemini Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+      "typeVersion": 1.1,
+      "position": [
+        240,
+        528
+      ],
+      "credentials": {
+        "googlePalmApi": {
+          "id": "OSbzI8dGz4txDG7I",
+          "name": "Google Gemini(PaLM) Api account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsonSchemaExample": "{\"category\":\"University\",\"priority\":\"High\",\"replyRequired\":true,\"replySubject\":\"Re: Course registration deadline\",\"replyBody\":\"Hi,\\n\\nThank you for the reminder. I will complete my registration before the deadline.\\n\\nBest regards\"}"
+      },
+      "id": "956c0e15-5a06-457b-b09f-1cbfb7b8cf26",
+      "name": "Classification Schema",
+      "type": "@n8n/n8n-nodes-langchain.outputParserStructured",
+      "typeVersion": 1.3,
+      "position": [
+        368,
+        528
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const validCategories = ['Important','University','Assignment','Internship','Job','Personal','Shopping','Banking','Promotion','Spam','Other'];\nconst labels = $('Get Existing Labels').all().map(i => i.json);\nconst emails = $('Gmail Trigger').all();\nconst classified = $input.all();\nconst results = [];\nfor (let i = 0; i < classified.length; i++) {\n  const out = classified[i].json.output || classified[i].json || {};\n  const email = emails[i] ? emails[i].json : {};\n  let category = String(out.category || 'Other').trim();\n  if (!validCategories.some(c => c.toLowerCase() === category.toLowerCase())) { category = 'Other'; }\n  else { category = validCategories.find(c => c.toLowerCase() === category.toLowerCase()); }\n  let priority = String(out.priority || 'Medium').trim();\n  if (!['High','Medium','Low'].some(p => p.toLowerCase() === priority.toLowerCase())) { priority = 'Medium'; }\n  else { priority = ['High','Medium','Low'].find(p => p.toLowerCase() === priority.toLowerCase()); }\n  const replyRequired = out.replyRequired === true || out.replyRequired === 'true';\n  const match = labels.find(l => String(l.name || '').toLowerCase() === category.toLowerCase());\n  let fromAddr = '';\n  const f = email.from;\n  if (f) { if (typeof f === 'string') fromAddr = f; else if (f.value && f.value[0]) fromAddr = f.value[0].address; else if (f.text) fromAddr = f.text; }\n  if (!fromAddr && email.headers) fromAddr = email.headers.from || '';\n  const subject = email.subject || (email.headers && email.headers.subject) || '';\n  const body = email.text || email.textAsHtml || email.snippet || '';\n  const isAcademic = category === 'Assignment' || category === 'University';\n  results.push({ json: {\n    emailId: email.id,\n    threadId: email.threadId,\n    subject: subject,\n    from: fromAddr,\n    body: body,\n    category: category,\n    priority: priority,\n    replyRequired: replyRequired,\n    replySubject: out.replySubject || ('Re: ' + subject),\n    replyBody: out.replyBody || '',\n    labelName: category,\n    labelId: match ? match.id : '',\n    labelExists: !!match,\n    isAcademic: isAcademic,\n  } });\n}\nreturn results;"
+      },
+      "id": "b0cea2a7-6015-43f7-b485-91b5e242bca5",
+      "name": "Resolve Label & Fields",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        576,
+        304
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "label-exists",
+              "leftValue": "={{ $json.labelExists }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "f92639e8-6b14-4778-9060-bece2b80bc5f",
+      "name": "Label Exists?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        800,
+        144
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "addLabels",
+        "messageId": "={{ $json.emailId }}",
+        "labelIds": [
+          "={{ $json.labelId }}"
+        ]
+      },
+      "id": "1970b146-2c21-4e6f-b6fa-bfec38caecdc",
+      "name": "Apply Existing Label",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        1376,
+        48
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "webhookId": "37825c8e-f8c0-4217-b189-cc827c4a334a",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "Ta2ubITc6prHXHNZ",
+          "name": "Gmail account"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "reply-required",
+              "leftValue": "={{ $('Resolve Label & Fields').item.json.replyRequired }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "fa32881a-cf9b-4316-b9e6-479713b76ff8",
+      "name": "Reply Required?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1600,
+        144
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "draft",
+        "subject": "={{ $('Resolve Label & Fields').item.json.replySubject }}",
+        "message": "={{ $('Resolve Label & Fields').item.json.replyBody }}",
+        "options": {
+          "threadId": "={{ $('Resolve Label & Fields').item.json.threadId }}",
+          "sendTo": "={{ $('Resolve Label & Fields').item.json.from }}"
+        }
+      },
+      "id": "983fb31d-728f-4e56-96ae-53dd477eb351",
+      "name": "Create Reply Draft",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        1824,
+        144
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "webhookId": "0152bdd3-a979-4557-bbf1-5c723051db0d",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "Ta2ubITc6prHXHNZ",
+          "name": "Gmail account"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "resource": "label",
+        "operation": "create",
+        "name": "={{ $json.labelName }}",
+        "options": {
+          "labelListVisibility": "labelShow",
+          "messageListVisibility": "show"
+        }
+      },
+      "id": "bf85e632-0a6f-4e1c-a4e4-97013308f98a",
+      "name": "Create Label",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        1088,
+        240
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "webhookId": "ee7b8968-6467-4d8f-bde3-5cbcc2164c85",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "Ta2ubITc6prHXHNZ",
+          "name": "Gmail account"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "operation": "addLabels",
+        "messageId": "={{ $('Resolve Label & Fields').item.json.emailId }}",
+        "labelIds": [
+          "={{ $json.id }}"
+        ]
+      },
+      "id": "55df4ab8-86eb-42c8-b667-49e05a1d52e0",
+      "name": "Apply New Label",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        1376,
+        240
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "webhookId": "770ae279-85b1-4de0-bd70-747308001634",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "Ta2ubITc6prHXHNZ",
+          "name": "Gmail account"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "is-academic",
+              "leftValue": "={{ $json.isAcademic }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "9ad6d077-39df-4a2d-a351-4b706d1d804f",
+      "name": "Academic Email?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        800,
+        544
+      ]
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=You extract academic assignment details from a university/course email. Return structured JSON.\n\nRules:\n- Set \"hasDeadline\" to true ONLY if the email mentions a concrete due date / submission deadline for a task, assignment, quiz, project or exam. Otherwise set it false and leave the other fields as empty strings.\n- \"deadline\": normalise to an ISO date (YYYY-MM-DD) when a specific date is present; include time if given. If only relative wording exists (e.g. \"next Friday\") keep the original wording.\n- \"courseName\": the course/subject name or code. \"assignmentName\": the task/assignment title.\n- \"marks\": the marks/weight/points if stated (e.g. \"20\", \"10%\"), else \"\".\n- \"submissionLink\": a submission or LMS URL if present, else \"\".\n- Never invent values. Use \"\" for anything not stated.\n\n--- EMAIL ---\nSubject: {{ $json.subject }}\nFrom: {{ $json.from }}\n\nBody:\n{{ $json.body }}",
+        "hasOutputParser": true,
+        "batching": {}
+      },
+      "id": "7a993691-bd3e-451a-b42b-456c3a15ffe8",
+      "name": "Extract Deadline Details",
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.9,
+      "position": [
+        1024,
+        544
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "options": {
+          "temperature": 0.1
+        }
+      },
+      "id": "45a81271-d481-4b8b-a2f9-396a1d1567a3",
+      "name": "Gemini Model (Extract)",
+      "type": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+      "typeVersion": 1.1,
+      "position": [
+        1040,
+        768
+      ],
+      "credentials": {
+        "googlePalmApi": {
+          "id": "OSbzI8dGz4txDG7I",
+          "name": "Google Gemini(PaLM) Api account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsonSchemaExample": "{\"hasDeadline\":true,\"courseName\":\"CS101 Introduction to Programming\",\"assignmentName\":\"Assignment 3 - Recursion\",\"deadline\":\"2026-07-25\",\"marks\":\"20\",\"submissionLink\":\"https://lms.university.edu/submit/12345\"}"
+      },
+      "id": "076541f1-85b2-4c69-aa4b-fde2a2168ed0",
+      "name": "Deadline Schema",
+      "type": "@n8n/n8n-nodes-langchain.outputParserStructured",
+      "typeVersion": 1.3,
+      "position": [
+        1168,
+        768
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "has-deadline",
+              "leftValue": "={{ $json.output.hasDeadline }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "568e86c5-0bef-43a3-8ddb-8ac0b038c5f2",
+      "name": "Has Deadline?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1376,
+        544
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "course",
+              "name": "Course Name",
+              "value": "={{ $json.output.courseName }}",
+              "type": "string"
+            },
+            {
+              "id": "assignment",
+              "name": "Assignment Name",
+              "value": "={{ $json.output.assignmentName }}",
+              "type": "string"
+            },
+            {
+              "id": "deadline",
+              "name": "Deadline",
+              "value": "={{ $json.output.deadline }}",
+              "type": "string"
+            },
+            {
+              "id": "marks",
+              "name": "Marks",
+              "value": "={{ $json.output.marks }}",
+              "type": "string"
+            },
+            {
+              "id": "link",
+              "name": "Submission Link",
+              "value": "={{ $json.output.submissionLink }}",
+              "type": "string"
+            },
+            {
+              "id": "subject",
+              "name": "Email Subject",
+              "value": "={{ $('Resolve Label & Fields').item.json.subject }}",
+              "type": "string"
+            },
+            {
+              "id": "from",
+              "name": "From",
+              "value": "={{ $('Resolve Label & Fields').item.json.from }}",
+              "type": "string"
+            },
+            {
+              "id": "added",
+              "name": "Date Added",
+              "value": "={{ $now.toISO() }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "b96dc6d1-0915-41a1-b712-6f54a95d1cff",
+      "name": "Build Assignment Row",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        1808,
+        544
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "12pHZnVd_zPAhswUhhchK-XaJp0G_JehNkIxgj5qs3tg",
+          "cachedResultName": "University Assignments",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/12pHZnVd_zPAhswUhhchK-XaJp0G_JehNkIxgj5qs3tg/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "list",
+          "value": "gid=0",
+          "cachedResultName": "Sheet1",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/12pHZnVd_zPAhswUhhchK-XaJp0G_JehNkIxgj5qs3tg/edit#gid=0"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": []
+        },
+        "options": {
+          "handlingExtraData": "insertInNewColumn"
+        }
+      },
+      "id": "afb34dbd-2237-4fcb-97bc-5e909dc9a3b2",
+      "name": "Save Assignment to Sheet",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        2032,
+        544
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "mkUZTPRvV3eM2ne4",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "## Gmail AI \nClassifies every new email with Gemini, applies the matching Gmail label (creating it if missing), sets a priority, and drafts a reply only when one is needed. Drafts are never sent automatically.",
+        "height": 220,
+        "width": 380,
+        "color": 4
+      },
+      "id": "b47792ef-7e39-4da9-aabe-2b3ba2b924d7",
+      "name": "Overview",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        432,
+        736
+      ]
+    },
+    {
+      "parameters": {
+        "content": "### Academic deadline capture\nAssignment/University emails are checked for a deadline. When found, Gemini extracts course, assignment, deadline, marks and submission link, and the row is upserted (matched on Assignment Name) into Google Sheets.",
+        "height": 230,
+        "width": 340,
+        "color": 5
+      },
+      "id": "8011cfd4-2400-4d93-a3b4-3d1bac93bd3d",
+      "name": "Deadline Capture",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        48,
+        736
+      ]
+    },
+    {
+      "parameters": {
+        "content": "### Error handling\nAll Gmail, AI and Sheets nodes retry up to 3x on transient failures. For instance-wide alerting, attach an Error Trigger workflow via this workflow’s settings after publishing.",
+        "height": 210,
+        "width": 320,
+        "color": 3
+      },
+      "id": "2fe6c46f-c1fd-424f-979d-13ef9e123812",
+      "name": "Error Handling",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -336,
+        736
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Gmail Trigger": {
+      "main": [
+        [
+          {
+            "node": "Get Existing Labels",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Classify Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Classify Email": {
+      "main": [
+        [
+          {
+            "node": "Resolve Label & Fields",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gemini Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Classify Email",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Classification Schema": {
+      "ai_outputParser": [
+        [
+          {
+            "node": "Classify Email",
+            "type": "ai_outputParser",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Resolve Label & Fields": {
+      "main": [
+        [
+          {
+            "node": "Label Exists?",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Academic Email?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Label Exists?": {
+      "main": [
+        [
+          {
+            "node": "Apply Existing Label",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Create Label",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Apply Existing Label": {
+      "main": [
+        [
+          {
+            "node": "Reply Required?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reply Required?": {
+      "main": [
+        [
+          {
+            "node": "Create Reply Draft",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Label": {
+      "main": [
+        [
+          {
+            "node": "Apply New Label",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Apply New Label": {
+      "main": [
+        [
+          {
+            "node": "Reply Required?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Academic Email?": {
+      "main": [
+        [
+          {
+            "node": "Extract Deadline Details",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Deadline Details": {
+      "main": [
+        [
+          {
+            "node": "Has Deadline?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gemini Model (Extract)": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Extract Deadline Details",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Deadline Schema": {
+      "ai_outputParser": [
+        [
+          {
+            "node": "Extract Deadline Details",
+            "type": "ai_outputParser",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has Deadline?": {
+      "main": [
+        [
+          {
+            "node": "Build Assignment Row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Assignment Row": {
+      "main": [
+        [
+          {
+            "node": "Save Assignment to Sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "4cf15afa-5353-4a69-9351-71dc90f9fcf5",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "0ea858eac747e712c435102d295c47cc80495c08dbdaca108d6c53b9fe30461d"
+  },
+  "nodeGroups": [],
+  "id": "q48apEYeYmp8SFec",
+  "tags": []
+}
